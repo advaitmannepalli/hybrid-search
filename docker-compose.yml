@@ -1,0 +1,15 @@
+version: '3'
+services:
+  opensearch:
+    image: opensearchproject/opensearch:2.11.0
+    environment:
+      - discovery.type=single-node
+      - DISABLE_SECURITY_PLUGIN=true  # easier for local dev
+      # - plugins.knn.enabled=true
+    ports:
+      - 9200:9200
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+
+volumes:
+  opensearch-data:
