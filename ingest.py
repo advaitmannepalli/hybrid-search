@@ -5,6 +5,8 @@ from bs4 import BeautifulSoup
 from opensearchpy import OpenSearch
 from urllib.parse import urljoin, urlparse
 from sentence_transformers import SentenceTransformer
+import pytesseract
+from pdf2image import convert_from_bytes
 
 client = OpenSearch(hosts=["http://localhost:9200"])
 model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -109,8 +111,18 @@ def ingest_pdf(url):
             if text:
                 full_text += text + " "
 
+    # if pdfplumber found nothing, fall back to OCR
     if not full_text.strip():
-        print(f"  → no text found, skipping")
+        print(f"  → no text found, trying OCR...")
+        images = convert_from_bytes(response.content)
+        for i, image in enumerate(images):
+            text = pytesseract.image_to_string(image)
+            if text:
+                full_text += text + " "
+            print(f"  → OCR processed page {i+1}/{len(images)}")
+
+    if not full_text.strip():
+        print(f"  → no text found even after OCR, skipping")
         return
 
     chunks = chunk_text(full_text)
