@@ -7,12 +7,15 @@ from urllib.parse import urljoin, urlparse
 from sentence_transformers import SentenceTransformer
 import pytesseract
 from pdf2image import convert_from_bytes
+import threading
+from queue import Queue, Empty
+from concurrent.futures import ThreadPoolExecutor
 
 client = OpenSearch(hosts=["http://localhost:9200"])
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 START_URL = "https://www.ercot.com"
-MAX_PAGES = 200
+MAX_PAGES = 500
 
 def reset_index():
     if client.indices.exists(index="docs"):
@@ -130,37 +133,54 @@ def ingest_pdf(url):
     print(f"  → indexed {len(chunks)} chunks from PDF")
 
 def crawl():
+    url_queue = Queue() # no need for manual lock, Queues already have
+    url_queue.put(START_URL)
+    
     visited = set()
-    queue = [START_URL]
+    visited_lock = threading.Lock()  # prevents two threads touching visited at same time
+    
+    def process_url():
+        while True:
+            try:
+                # grab next URL from queue, give up after 3 seconds if empty
+                url = url_queue.get(timeout=3)
+            except Empty:
+                break
 
-    while queue and len(visited) < MAX_PAGES:
-        url = queue.pop(0)
+            # thread safe check — skip if already visited or over limit
+            with visited_lock:
+                if url in visited or len(visited) >= MAX_PAGES:
+                    url_queue.task_done()
+                    continue
+                visited.add(url)
 
-        if url in visited:
-            continue
+            try:
+                print(f"[{len(visited)}/{MAX_PAGES}] Crawling {url}")
 
-        try:
-            print(f"[{len(visited)+1}/{MAX_PAGES}] Crawling {url}")
+                if url.endswith(".pdf"):
+                    ingest_pdf(url)
+                else:
+                    soup = ingest_url(url)
+                    new_links, new_pdfs = get_links(url, soup)
 
-            if url.endswith(".pdf"):
-                ingest_pdf(url)
-            else:
-                soup = ingest_url(url)
-                new_links, new_pdfs = get_links(url, soup)
+                    for link in new_links:
+                        with visited_lock:
+                            if link not in visited:
+                                url_queue.put(link)
 
-                for link in new_links:
-                    if link not in visited and link not in queue:
-                        queue.append(link)
+                    for pdf in new_pdfs:
+                        with visited_lock:
+                            if pdf not in visited:
+                                url_queue.put(pdf)
 
-                for pdf in new_pdfs:
-                    if pdf not in visited and pdf not in queue:
-                        queue.append(pdf)
+            except Exception as e:
+                print(f"  → skipping {url}: {e}")
 
-            visited.add(url)
+            url_queue.task_done()
 
-        except Exception as e:
-            print(f"  → skipping {url}: {e}")
-            continue
+    # spin up 10 workers all running process_url simultaneously
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(process_url) for _ in range(10)]
 
     print(f"\nDone! Crawled {len(visited)} pages.")
 
