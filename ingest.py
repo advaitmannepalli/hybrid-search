@@ -10,12 +10,14 @@ from pdf2image import convert_from_bytes
 import threading
 from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor
+from docx import Document
+import openpyxl
 
 client = OpenSearch(hosts=["http://localhost:9200"])
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 START_URL = "https://www.ercot.com"
-MAX_PAGES = 500
+MAX_PAGES = 300
 
 def reset_index():
     if client.indices.exists(index="docs"):
@@ -42,6 +44,9 @@ def reset_index():
 def get_links(url, soup):
     html_links = set()
     pdf_links = set()
+    xlsx_links = set()
+    docx_links = set()
+
     base_domain = urlparse(START_URL).netloc
 
     for a_tag in soup.find_all("a", href=True):
@@ -56,10 +61,14 @@ def get_links(url, soup):
 
         if clean_url.endswith(".pdf"):
             pdf_links.add(clean_url)
-        elif not any(clean_url.endswith(ext) for ext in [".zip", ".xlsx", ".png", ".jpg"]):
+        elif clean_url.endswith(".docx"):
+            docx_links.add(clean_url)
+        elif clean_url.endswith(".xlsx"):
+            xlsx_links.add(clean_url)
+        elif not any(clean_url.endswith(ext) for ext in [".zip", ".png", ".jpg", ".mp4"]):
             html_links.add(clean_url)
 
-    return html_links, pdf_links
+    return html_links, pdf_links, docx_links, xlsx_links
 
 def fetch_page(url):
     response = requests.get(url, timeout=10)
@@ -132,6 +141,59 @@ def ingest_pdf(url):
     index_chunks(title, chunks, url)
     print(f"  → indexed {len(chunks)} chunks from PDF")
 
+def ingest_docx(url):
+    print(f"  → reading DOCX: {url}")
+    response = requests.get(url, timeout=30)
+
+    doc = Document(io.BytesIO(response.content))
+    title = url.split("/")[-1].replace(".docx", "")
+    full_text = " ".join([para.text for para in doc.paragraphs if para.text.strip()])
+
+    if not full_text.strip():
+        print(f"  → no text found, skipping")
+        return
+
+    chunks = chunk_text(full_text)
+    index_chunks(title, chunks, url)
+    print(f"  → indexed {len(chunks)} chunks from DOCX")
+
+def ingest_xlsx(url):
+    print(f"  → reading XLSX: {url}")
+    response = requests.get(url, timeout=30)
+
+    workbook = openpyxl.load_workbook(io.BytesIO(response.content), data_only=True)
+    title = url.split("/")[-1].replace(".xlsx", "")
+    full_text = ""
+
+    for sheet in workbook.worksheets:
+        # get headers from first row
+        headers = []
+        for cell in sheet[1]:
+            headers.append(str(cell.value) if cell.value is not None else "")
+
+        # convert each subsequent row to labeled text
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            # skip completely empty rows
+            if not any(cell is not None for cell in row):
+                continue
+
+            row_text = " | ".join([
+                f"{headers[i]}: {str(val)}"
+                for i, val in enumerate(row)
+                if val is not None and i < len(headers) and headers[i]
+            ])
+
+            if row_text.strip():
+                full_text += row_text + "\n"
+
+    if not full_text.strip():
+        print(f"  → no text found, skipping")
+        return
+
+    chunks = chunk_text(full_text)
+    index_chunks(title, chunks, url)
+    print(f"  → indexed {len(chunks)} chunks from XLSX")
+
 def crawl():
     url_queue = Queue() # no need for manual lock, Queues already have
     url_queue.put(START_URL)
@@ -159,9 +221,13 @@ def crawl():
 
                 if url.endswith(".pdf"):
                     ingest_pdf(url)
+                elif url.endswith(".docx"):
+                    ingest_docx(url)
+                elif url.endswith(".xlsx"):
+                    ingest_xlsx(url)
                 else:
                     soup = ingest_url(url)
-                    new_links, new_pdfs = get_links(url, soup)
+                    new_links, new_pdfs, new_docx, new_xlsx = get_links(url, soup)
 
                     for link in new_links:
                         with visited_lock:
@@ -173,13 +239,23 @@ def crawl():
                             if pdf not in visited:
                                 url_queue.put(pdf)
 
+                    for docx in new_docx:
+                        with visited_lock:
+                            if docx not in visited:
+                                url_queue.put(docx)
+
+                    for xlsx in new_xlsx:
+                        with visited_lock:
+                            if xlsx not in visited:
+                                url_queue.put(xlsx)
+
             except Exception as e:
                 print(f"  → skipping {url}: {e}")
 
             url_queue.task_done()
 
     # spin up 10 workers all running process_url simultaneously
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    with ThreadPoolExecutor(max_workers=15) as executor:
         futures = [executor.submit(process_url) for _ in range(10)]
 
     print(f"\nDone! Crawled {len(visited)} pages.")
