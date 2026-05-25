@@ -34,7 +34,7 @@ function App() {
       <div className="content">
         <div className="hero">
           <h1>Search</h1>
-          <p className="subtitle">ERCOT document search</p>
+          <p className="subtitle">Document search</p>
         </div>
 
         <form onSubmit={handleSearch} className="search-form">

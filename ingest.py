@@ -17,7 +17,19 @@ client = OpenSearch(hosts=["http://localhost:9200"])
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 START_URL = "https://www.ercot.com"
-MAX_PAGES = 300
+MAX_PAGES = 500
+
+def create_session():
+    session = requests.Session()
+
+    session.headers.update({
+        "User-Agent": (
+            "HybridSearchBot/1.0 "
+            "(Educational Search Engine Project)"
+        )
+    })
+
+    return session
 
 def reset_index():
     if client.indices.exists(index="docs"):
@@ -70,8 +82,8 @@ def get_links(url, soup):
 
     return html_links, pdf_links, docx_links, xlsx_links
 
-def fetch_page(url):
-    response = requests.get(url, timeout=10)
+def fetch_page(url, session):
+    response = session.get(url, timeout=10)
     soup = BeautifulSoup(response.text, "html.parser")
     for tag in soup(["nav", "footer", "script", "style"]):
         tag.decompose()
@@ -102,15 +114,15 @@ def index_chunks(title, chunks, url):
         }
         client.index(index="docs", body=doc)
 
-def ingest_url(url):
-    title, body, soup = fetch_page(url)
+def ingest_url(url, session):
+    title, body, soup = fetch_page(url, session)
     chunks = chunk_text(body)
     index_chunks(title, chunks, url)
     return soup
 
-def ingest_pdf(url):
+def ingest_pdf(url, session):
     print(f"  → reading PDF: {url}")
-    response = requests.get(url, timeout=30)
+    response = session.get(url, timeout=10)
 
     # load the PDF from memory instead of saving to disk
     pdf_file = io.BytesIO(response.content)
@@ -141,9 +153,9 @@ def ingest_pdf(url):
     index_chunks(title, chunks, url)
     print(f"  → indexed {len(chunks)} chunks from PDF")
 
-def ingest_docx(url):
+def ingest_docx(url, session):
     print(f"  → reading DOCX: {url}")
-    response = requests.get(url, timeout=30)
+    response = session.get(url, timeout=10)
 
     doc = Document(io.BytesIO(response.content))
     title = url.split("/")[-1].replace(".docx", "")
@@ -157,9 +169,9 @@ def ingest_docx(url):
     index_chunks(title, chunks, url)
     print(f"  → indexed {len(chunks)} chunks from DOCX")
 
-def ingest_xlsx(url):
+def ingest_xlsx(url, session):
     print(f"  → reading XLSX: {url}")
-    response = requests.get(url, timeout=30)
+    response = session.get(url, timeout=10)
 
     workbook = openpyxl.load_workbook(io.BytesIO(response.content), data_only=True)
     title = url.split("/")[-1].replace(".xlsx", "")
@@ -202,6 +214,8 @@ def crawl():
     visited_lock = threading.Lock()  # prevents two threads touching visited at same time
     
     def process_url():
+        session = create_session()
+
         while True:
             try:
                 # grab next URL from queue, give up after 3 seconds if empty
@@ -220,13 +234,13 @@ def crawl():
                 print(f"[{len(visited)}/{MAX_PAGES}] Crawling {url}")
 
                 if url.endswith(".pdf"):
-                    ingest_pdf(url)
+                    ingest_pdf(url, session)
                 elif url.endswith(".docx"):
-                    ingest_docx(url)
+                    ingest_docx(url, session)
                 elif url.endswith(".xlsx"):
-                    ingest_xlsx(url)
+                    ingest_xlsx(url, session)
                 else:
-                    soup = ingest_url(url)
+                    soup = ingest_url(url, session)
                     new_links, new_pdfs, new_docx, new_xlsx = get_links(url, soup)
 
                     for link in new_links:
