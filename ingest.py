@@ -1,3 +1,4 @@
+import time
 import requests
 import pdfplumber
 import io
@@ -102,17 +103,29 @@ def chunk_text(text, size=300, overlap=30):
     return chunks
 
 def index_chunks(title, chunks, url):
-    for i, chunk in enumerate(chunks):
-        if not chunk.strip():
-            continue
-        embedding = model.encode(chunk).tolist()
+    valid_chunks = [
+        chunk for chunk in chunks
+        if chunk.strip()
+    ]
+
+    embeddings = model.encode(valid_chunks).tolist()
+    bulk_docs = []
+    for i, (chunk, embedding) in enumerate(zip(valid_chunks, embeddings)):
         doc = {
-            "title":     f"{title} (part {i+1})",
-            "body":      chunk,
-            "url":       url,
-            "embedding": embedding
-        }
-        client.index(index="docs", body=doc)
+                "title":     f"{title} (part {i+1})",
+                "body":      chunk,
+                "url":       url,
+                "embedding": embedding
+            }
+        bulk_docs.append({
+            "index": {
+                "_index": "docs"
+            }
+        })
+
+        bulk_docs.append(doc)
+    
+    client.bulk(body=bulk_docs)
 
 def ingest_url(url, session):
     title, body, soup = fetch_page(url, session)
@@ -207,6 +220,8 @@ def ingest_xlsx(url, session):
     print(f"  → indexed {len(chunks)} chunks from XLSX")
 
 def crawl():
+    start = time.time()
+
     url_queue = Queue() # no need for manual lock, Queues already have
     url_queue.put(START_URL)
     
@@ -268,11 +283,12 @@ def crawl():
 
             url_queue.task_done()
 
-    # spin up 10 workers all running process_url simultaneously
-    with ThreadPoolExecutor(max_workers=15) as executor:
-        futures = [executor.submit(process_url) for _ in range(10)]
+    # spin up 10 workers all running process_url simultaneously, purposely load in 30 tasks
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(process_url) for _ in range(30)]
 
-    print(f"\nDone! Crawled {len(visited)} pages.")
+    elapsed = time.time() - start
+    print(f"\nDone! Crawled {len(visited)} pages in {elapsed:.1f}s.")
 
 if __name__ == "__main__":
     reset_index()
