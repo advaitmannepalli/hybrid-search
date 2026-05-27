@@ -33,8 +33,8 @@ function App() {
     <div className={`app${searched ? ' has-results' : ''}`}>
       <div className="content">
         <div className="hero">
-          <h1>Search</h1>
-          <p className="subtitle">Document search</p>
+          <h1>Super Search 3000</h1>
+          <p className="credit">Designed by MournfulRook</p>
         </div>
 
         <form onSubmit={handleSearch} className="search-form">
@@ -51,7 +51,13 @@ function App() {
 
       {error && <p className="error">{error}</p>}
 
-      {loading && <p className="loading">Loading...</p>}
+      {loading && (
+        <div className="loading">
+          <span className="dot dot-1">.</span>
+          <span className="dot dot-2">.</span>
+          <span className="dot dot-3">.</span>
+        </div>
+      )}
 
       {results && results.length === 0 && (
         <p className="no-results">No results found.</p>
@@ -62,7 +68,7 @@ function App() {
           <div className="results-header">{results.length} results</div>
           <ul className="results">
             {results.map((r, i) => (
-              <li key={i} className="result-item">
+              <li key={i} className="result-item" style={{ animationDelay: `${i * 0.06}s` }}>
                 <a href={r.url} className="result-title" target="_blank" rel="noopener noreferrer">
                   {r.title}
                 </a>
