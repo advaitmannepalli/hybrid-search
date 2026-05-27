@@ -92,11 +92,11 @@ def fetch_page(url, session):
     body = soup.get_text(separator=" ", strip=True)
     return title, body, soup
 
-def chunk_text(text, size=300, overlap=30):
+def chunk_text(text, size=300, overlap=30, max_chunks=75):
     words = text.split()
     chunks = []
     i = 0
-    while i < len(words):
+    while i < len(words) and len(chunks) < max_chunks:
         chunk = " ".join(words[i:i+size])
         chunks.append(chunk)
         i += size - overlap
@@ -127,13 +127,13 @@ def index_chunks(title, chunks, url):
     
     client.bulk(body=bulk_docs)
 
-def ingest_url(url, session):
+def ingest_url(url, session, embed_queue):
     title, body, soup = fetch_page(url, session)
     chunks = chunk_text(body)
-    index_chunks(title, chunks, url)
+    embed_queue.put((title, chunks, url))
     return soup
 
-def ingest_pdf(url, session):
+def ingest_pdf(url, session, embed_queue):
     print(f"  → reading PDF: {url}")
     response = session.get(url, timeout=10)
 
@@ -163,10 +163,10 @@ def ingest_pdf(url, session):
         return
 
     chunks = chunk_text(full_text)
-    index_chunks(title, chunks, url)
+    embed_queue.put((title, chunks, url))
     print(f"  → indexed {len(chunks)} chunks from PDF")
 
-def ingest_docx(url, session):
+def ingest_docx(url, session, embed_queue):
     print(f"  → reading DOCX: {url}")
     response = session.get(url, timeout=10)
 
@@ -179,10 +179,10 @@ def ingest_docx(url, session):
         return
 
     chunks = chunk_text(full_text)
-    index_chunks(title, chunks, url)
+    embed_queue.put((title, chunks, url))
     print(f"  → indexed {len(chunks)} chunks from DOCX")
 
-def ingest_xlsx(url, session):
+def ingest_xlsx(url, session, embed_queue):
     print(f"  → reading XLSX: {url}")
     response = session.get(url, timeout=10)
 
@@ -216,14 +216,43 @@ def ingest_xlsx(url, session):
         return
 
     chunks = chunk_text(full_text)
-    index_chunks(title, chunks, url)
+    embed_queue.put((title, chunks, url))
     print(f"  → indexed {len(chunks)} chunks from XLSX")
+
+def process_batch(batch):
+    all_chunks = []
+    meta = []
+
+    for title, chunks, url in batch:
+        for chunk in chunks:
+            if chunk.strip():
+                all_chunks.append(chunk)
+                meta.append((title, url))
+
+    embeddings = model.encode(all_chunks).tolist()
+
+    bulk_docs = []
+    for (title, url), chunk, emb in zip(meta, all_chunks, embeddings):
+        bulk_docs.append({
+            "index": {"_index": "docs"}
+        })
+        bulk_docs.append({
+            "title": title,
+            "body": chunk,
+            "url": url,
+            "embedding": emb
+        })
+
+    client.bulk(body=bulk_docs)
 
 def crawl():
     start = time.time()
 
     url_queue = Queue() # no need for manual lock, Queues already have
     url_queue.put(START_URL)
+    
+    # have a separate queue for embedding only, separate the bottleneck
+    embed_queue = Queue()
     
     visited = set()
     visited_lock = threading.Lock()  # prevents two threads touching visited at same time
@@ -249,13 +278,13 @@ def crawl():
                 print(f"[{len(visited)}/{MAX_PAGES}] Crawling {url}")
 
                 if url.endswith(".pdf"):
-                    ingest_pdf(url, session)
+                    ingest_pdf(url, session, embed_queue)
                 elif url.endswith(".docx"):
-                    ingest_docx(url, session)
+                    ingest_docx(url, session, embed_queue)
                 elif url.endswith(".xlsx"):
-                    ingest_xlsx(url, session)
+                    ingest_xlsx(url, session, embed_queue)
                 else:
-                    soup = ingest_url(url, session)
+                    soup = ingest_url(url, session, embed_queue)
                     new_links, new_pdfs, new_docx, new_xlsx = get_links(url, soup)
 
                     for link in new_links:
@@ -283,9 +312,41 @@ def crawl():
 
             url_queue.task_done()
 
-    # spin up 10 workers all running process_url simultaneously, purposely load in 30 tasks
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = [executor.submit(process_url) for _ in range(30)]
+    def embedder():
+        batch = []
+        BATCH_SIZE = 10
+
+        while True:
+            item = embed_queue.get()
+
+            if item is None:
+                break
+
+            batch.append(item)
+            embed_queue.task_done()
+
+            if len(batch) >= BATCH_SIZE:
+                process_batch(batch)
+                batch = []
+
+        # flush leftovers at the end
+        if batch:
+            process_batch(batch)
+
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        for _ in range(30):
+            executor.submit(process_url)
+
+        # start 2 embedding workers
+        for _ in range(2):
+            executor.submit(embedder)
+
+        url_queue.join()
+        embed_queue.join()
+
+        # signal both embedders to stop
+        for _ in range(2):
+            embed_queue.put(None)
 
     elapsed = time.time() - start
     print(f"\nDone! Crawled {len(visited)} pages in {elapsed:.1f}s.")
