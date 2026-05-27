@@ -39,7 +39,7 @@ cd frontend && npm install && npm run dev
 
 Open `http://localhost:5173` and search.
 
-**Note:** `ingest.py` downloads and indexes up to 300 pages. It takes a while. If you want to change the target site or page limit, edit `START_URL` and `MAX_PAGES` at the top of `ingest.py`.
+**Note:** `ingest.py` downloads and indexes up to 500 pages. It takes a while. If you want to change the target site or page limit, edit `START_URL` and `MAX_PAGES` at the top of `ingest.py`.
 
 ## API
 
@@ -66,11 +66,15 @@ Returns JSON:
 
 ```
 ├── docker-compose.yml    # OpenSearch 2.11
-├── ingest.py             # Crawler + indexer
+├── ingest.py             # Crawler + indexer (producer-consumer with 3 embedder threads)
 ├── main.py               # FastAPI search server
+├── requirements.txt      # Python dependencies (includes test deps)
+├── test_main.py          # 5 API tests (mock OpenSearch + model)
+├── test_ingest.py        # 8 chunking + link-parsing tests
 └── frontend/             # Vite + React app
+    ├── public/fonts/     # Self-hosted Star Jedi TTF (Boba Fonts)
     ├── src/App.jsx       # Search UI
-    └── src/App.css       # Styling
+    └── src/App.css       # Dark theme, CSS animations, Star Jedi font
 ```
 
 ## Troubleshooting
